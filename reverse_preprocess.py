@@ -19,47 +19,73 @@ def restore_string_literals(content, output_folder):
     save_step(restored, output_folder, "step2_restored_strings.c")
     return restored
 
-def infer_variable_types(content):
+def extract_function_params(content):
+    """Extracts parameter names from the main() function signature."""
+    match = re.search(r'\bmain\s*\(([^)]*)\)', content)
+    if not match:
+        return set()
+    param_block = match.group(1)
+    param_names = set()
+    # Extract names like: int (*temp1), char (*string)
+    for part in param_block.split(','):
+        part = part.strip()
+        tokens = re.findall(r'\(*\s*\*?\s*(\w+)\s*\)*', part)
+        if tokens:
+            param_names.add(tokens[-1])
+    return param_names
+
+def is_valid_identifier(name):
+    return name.isidentifier() and not name[0].isdigit()
+
+def infer_variable_types(content, function_params):
     """
     Analyzes the code and returns a dict {var_name: type}
     """
     inferred_types = defaultdict(lambda: "int")  # Default to int
+    declared = set()
+
     lines = content.splitlines()
     for line in lines:
-        # Infer from indexing like string[i]
+        # Infer from array usage like string[i]
         if match := re.search(r'(\w+)\s*\[.*?\]', line):
-            inferred_types[match.group(1)] = "char *"
-        # Infer from pointer usage like (*temptemp1) = ...
+            var = match.group(1)
+            if var not in function_params and is_valid_identifier(var):
+                inferred_types[var] = "char *"
+        
+        # Pointer assignments like (*temp1) = something
         for match in re.finditer(r'\(\*\s*(\w+)\s*\)', line):
-            inferred_types[match.group(1)] = "int *"
-        # Direct int-like usage
-        for match in re.finditer(r'\b(\w+)\s*[\+\-\*/]?=|[\+\-]{2}', line):
-            name = match.group(1)
-            if name not in inferred_types:
-                inferred_types[name] = "int"
+            var = match.group(1)
+            if var not in function_params and is_valid_identifier(var):
+                inferred_types[var] = "int *"
 
+        # Direct increment/decrement or compound assignment
+        for match in re.finditer(r'\b(\w+)\s*(?:\+\+|--|[+\-*/]?=)', line):
+            var = match.group(1)
+            if var not in function_params and is_valid_identifier(var):
+                inferred_types[var] = "int"
+    
     return inferred_types
 
 def insert_variable_declarations(content, inferred_types, output_folder):
-    """
-    Inserts variable declarations at top of main function.
-    """
     lines = content.splitlines()
     new_lines = []
     inside_main = False
     inserted = False
+    declared = set()
 
     for line in lines:
         new_lines.append(line)
+
         if not inserted and re.search(r'\bmain\s*\(.*\)\s*{', line):
             inside_main = True
         elif inside_main and not inserted:
-            # Insert inferred declarations
             for var, vartype in inferred_types.items():
-                if "*" in vartype:
-                    new_lines.append(f"  {vartype} {var};")
-                else:
-                    new_lines.append(f"  {vartype} {var} = 0;")
+                if var not in declared:
+                    declared.add(var)
+                    if "*" in vartype:
+                        new_lines.append(f"  {vartype} {var};")
+                    else:
+                        new_lines.append(f"  {vartype} {var} = 0;")
             inserted = True
 
     restored = "\n".join(new_lines)
@@ -78,7 +104,6 @@ def insert_dummy_io(content, output_folder):
             restored_lines.append('    printf("value = %d\\n", var);')
             inserted = True
 
-    # fallback: if not inserted above, inject before return
     if not inserted:
         final_lines = []
         for line in restored_lines:
@@ -106,7 +131,9 @@ def reverse_preprocess(input_file, output_folder):
 
     content = restore_main_function(content, output_folder)
     content = restore_string_literals(content, output_folder)
-    inferred_types = infer_variable_types(content)
+
+    function_params = extract_function_params(content)
+    inferred_types = infer_variable_types(content, function_params)
     content = insert_variable_declarations(content, inferred_types, output_folder)
     content = insert_dummy_io(content, output_folder)
 
